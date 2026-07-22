@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>MARS-判官 v4.2 (在地化版)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <style>
+        body { background: #000; color: #fff; font-family: "Microsoft JhengHei", "PingFang TC", sans-serif; select-none; }
+        .critical-flash { animation: bg-flash 0.5s infinite; }
+        @keyframes bg-flash { 0%, 100% { background: #450a0a; } 50% { background: #ff0000; } }
+        .data-error { border: 2px dashed #facc15 !important; }
+    </style>
+</head>
+<body class="p-0">
+
+    <!-- 頂部指標：戰力缺口 -->
+    <div id="panicHeader" class="bg-zinc-900 p-6 border-b-8 border-red-700 sticky top-0 z-50">
+        <div class="flex justify-between items-end">
+            <div>
+                <div class="text-zinc-500 font-black text-sm uppercase tracking-widest">戰力缺口 (人)</div>
+                <div id="statGapCount" class="text-7xl font-black leading-none text-white">--</div>
+            </div>
+            <div id="nextAvailable" class="text-red-500 font-bold text-xl italic uppercase">待命載入</div>
+        </div>
+    </div>
+
+    <!-- 優先派工區 -->
+    <div id="topPriority" class="p-4"></div>
+
+    <!-- 排程隊列 -->
+    <div id="scheduleList" class="p-4 space-y-3">
+        <div class="py-20 text-center text-zinc-700 font-bold text-2xl tracking-widest">請匯入名單資料...</div>
+    </div>
+
+    <!-- 底部大按鈕 -->
+    <div class="fixed bottom-0 w-full p-4 bg-black/90 backdrop-blur-md border-t border-zinc-800 flex gap-4">
+        <label class="flex-1 bg-red-600 text-white text-center py-6 font-black text-2xl cursor-pointer active:bg-red-700 shadow-lg">
+            匯入名單
+            <input type="file" id="csvFile" accept=".csv" class="hidden"/>
+        </label>
+        <button onclick="copyFullReport()" class="flex-1 bg-zinc-800 text-white py-6 font-black text-2xl active:bg-zinc-700">
+            派工報表
+        </button>
+    </div>
+
+    <div class="h-32"></div>
+
+    <script>
+        const MOCK_TODAY = new Date('2031-11-01');
+        let globalData = [];
+
+        document.getElementById('csvFile').addEventListener('change', e => {
+            Papa.parse(e.target.files[0], {
+                header: true, skipEmptyLines: true,
+                complete: r => {
+                    const seen = new Set();
+                    globalData = r.data.reduce((acc, row) => {
+                        const name = row['組員']?.trim();
+                        const type = row['資格項目']?.trim();
+                        const dateStr = row['取得日期']?.trim();
+                        if (!name) return acc;
+                        
+                        const key = `${name}-${type}-${dateStr}`;
+                        if (seen.has(key)) return acc;
+                        seen.add(key);
+
+                        const exp = parseDate(dateStr, parseInt(row['有效月數']) || 0);
+                        acc.push({ id: acc.length, name, type, exp, status: 'ready', isBad: isNaN(exp) });
+                        return acc;
+                    }, []);
+                    calculateSchedule();
+                }
+            });
+        });
+
+        function parseDate(str, months) {
+            try {
+                let c = str.replace(/[\/\-]/g, '');
+                let d = c.length === 8 ? new Date(`${c.substring(0,4)}-${c.substring(4,6)}-${c.substring(6,8)}`) : new Date(str);
+                if (isNaN(d)) return d;
+                d.setMonth(d.getMonth() + months);
+                return d;
+            } catch(e) { return new Date('invalid'); }
+        }
+
+        function toggleStatus(id) {
+            const p = globalData.find(x => x.id === id);
+            p.status = (p.status === 'ready') ? 'busy' : 'ready';
+            calculateSchedule();
+        }
+
+        function calculateSchedule() {
+            let readyList = globalData.filter(p => p.status === 'ready').sort((a, b) => a.exp - b.exp);
+            let busyList = globalData.filter(p => p.status === 'busy');
+            let machineTime = new Date(MOCK_TODAY);
+            let gapCount = 0;
+
+            const scheduled = readyList.map(p => {
+                if (p.isBad) return { ...p, endTime: new Date('3000-01-01'), isGap: false };
+                let endTime = new Date(machineTime);
+                endTime.setDate(endTime.getDate() + 2);
+                machineTime = new Date(endTime);
+                let isGap = endTime > p.exp;
+                if(isGap) gapCount++;
+                return { ...p, endTime, isGap };
+            });
+
+            render(scheduled, busyList, gapCount, machineTime);
+        }
+
+        function render(ready, busy, gapCount, nextAvail) {
+            document.getElementById('statGapCount').innerText = gapCount;
+            document.getElementById('nextAvailable').innerText = `空檔: ${nextAvail.getMonth()+1}/${nextAvail.getDate()}`;
+            const topDiv = document.getElementById('topPriority');
+            const listDiv = document.getElementById('scheduleList');
+            topDiv.innerHTML = ''; listDiv.innerHTML = '';
+
+            if(ready.length > 0) {
+                const first = ready[0];
+                topDiv.innerHTML = `
+                    <div class="p-6 ${first.isGap ? 'critical-flash' : 'bg-green-800'} ${first.isBad ? 'data-error' : ''}" onclick="dispatchSingle('${first.name}')">
+                        <div class="text-7xl font-black tracking-tighter">${first.name}</div>
+                        <div class="text-3xl font-bold">${first.isBad ? '數據異常' : first.type}</div>
+                        <button class="mt-4 w-full bg-white text-black font-black py-4 text-2xl uppercase">即刻召回</button>
+                    </div>`;
+
+                ready.slice(1).forEach(p => {
+                    const div = document.createElement('div');
+                    div.className = `p-4 border-l-8 ${p.isGap ? 'border-red-600 bg-zinc-900' : 'border-green-600 bg-zinc-900'} ${p.isBad ? 'data-error' : ''} flex justify-between items-center`;
+                    div.innerHTML = `<div onclick="toggleStatus(${p.id})">
+                                        <div class="text-3xl font-black">${p.name}</div>
+                                        <div class="text-sm font-bold text-zinc-500">${p.type} | 到期: ${p.isBad ? '??' : (p.exp.getMonth()+1)+'/'+p.exp.getDate()}</div>
+                                     </div>
+                                     <button onclick="toggleStatus(${p.id})" class="bg-zinc-800 px-6 py-4 font-bold text-xs">任務中</button>`;
+                    listDiv.appendChild(div);
+                });
+            }
+            busy.forEach(p => {
+                const div = document.createElement('div');
+                div.className = `p-4 bg-zinc-900 opacity-30 flex justify-between items-center`;
+                div.innerHTML = `<div class="text-xl font-bold">${p.name} (外勤任務中)</div>
+                                 <button onclick="toggleStatus(${p.id})" class="bg-zinc-800 px-4 py-2 font-bold text-xs">結束任務</button>`;
+                listDiv.appendChild(div);
+            });
+        }
+
+        function dispatchSingle(name) {
+            const msg = `🚨 [緊急召回] ${name}：請立即放下手邊工作，抵達模擬艙受訓，逾時資格直接失效。`;
+            const el = document.createElement('textarea'); el.value = msg; document.body.appendChild(el);
+            el.select(); document.execCommand('copy'); document.body.removeChild(el);
+            alert(`已抓取 ${name} 的召回簡訊，快去轉貼！`);
+        }
+
+        function copyFullReport() {
+            const ready = globalData.filter(p => p.status === 'ready').sort((a, b) => a.exp - b.exp);
+            const msg = `📢 基地派工單：\n1. ${ready[0]?.name || '無'}\n2. ${ready[1]?.name || '無'}\n3. ${ready[2]?.name || '無'}`;
+            const el = document.createElement('textarea'); el.value = msg; document.body.appendChild(el);
+            el.select(); document.execCommand('copy'); document.body.removeChild(el);
+            alert('已產生三日派工清單！');
+        }
+    </script>
+</body>
+</html>

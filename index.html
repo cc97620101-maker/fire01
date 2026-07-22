@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>MARS-判官 v4.3 終極版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <style>
+        body { background: #000; color: #fff; font-family: "Microsoft JhengHei", sans-serif; }
+        .critical-flash { animation: bg-flash 0.6s infinite; }
+        @keyframes bg-flash { 0%, 100% { background: #450a0a; } 50% { background: #b91c1c; } }
+        .ai-window { display: none; background: rgba(0,0,0,0.95); border: 2px solid #3b82f6; box-shadow: 0 0 30px rgba(59,130,246,0.5); }
+    </style>
+</head>
+<body class="p-0 overflow-x-hidden select-none">
+
+    <!-- 頂部：數據統計面板 -->
+    <div id="panicHeader" class="bg-zinc-900 p-5 border-b-8 border-red-700 sticky top-0 z-40">
+        <div class="flex justify-between items-start">
+            <div>
+                <div class="text-zinc-500 font-black text-xs uppercase tracking-tighter">
+                    匯入筆數: <span id="rawCount">--</span> | 異常: <span id="errorCount" class="text-yellow-500">--</span>
+                </div>
+                <div class="text-zinc-400 font-bold text-sm mt-1 uppercase">戰力缺口 (人)</div>
+                <div id="statGapCount" class="text-7xl font-black leading-none text-white">--</div>
+            </div>
+            <div class="text-right">
+                <div class="bg-white text-black px-2 py-1 font-black text-lg mb-1">設備: 1 號機</div>
+                <div id="nextAvailable" class="text-red-500 font-bold text-sm">等待指令...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 優先派工區 -->
+    <div id="topPriority" class="p-4"></div>
+
+    <!-- 滾動名單 -->
+    <div id="scheduleList" class="p-4 space-y-3">
+        <div class="py-20 text-center text-zinc-700 font-bold text-2xl">等待匯入資料...</div>
+    </div>
+
+    <!-- AI 戰術摘要浮動視窗 -->
+    <div id="aiModal" class="ai-window fixed inset-4 z-50 rounded-2xl p-6 overflow-y-auto">
+        <div class="flex justify-between items-center mb-6 border-b border-blue-500 pb-2">
+            <h2 class="text-2xl font-black text-blue-400">✨ AI 戰術摘要</h2>
+            <button onclick="toggleAI(false)" class="text-3xl text-zinc-400 font-bold">×</button>
+        </div>
+        <div id="aiContent" class="space-y-4 text-lg leading-relaxed text-blue-100">
+            <!-- AI 內容由 JS 生成 -->
+        </div>
+        <button onclick="toggleAI(false)" class="mt-8 w-full bg-blue-600 py-4 font-black text-xl rounded-xl">了解，關閉視窗</button>
+    </div>
+
+    <!-- 底部控制列 -->
+    <div class="fixed bottom-0 w-full p-4 bg-black/90 backdrop-blur-md border-t border-zinc-800 flex gap-2 z-30">
+        <label class="flex-[2] bg-red-600 text-white text-center py-5 font-black text-2xl cursor-pointer active:bg-red-700">
+            匯入 CSV
+            <input type="file" id="csvFile" accept=".csv" class="hidden"/>
+        </label>
+        <button onclick="toggleAI(true)" class="flex-1 bg-blue-700 text-white py-5 font-black text-xl active:bg-blue-800">
+            AI 戰報
+        </button>
+    </div>
+
+    <div class="h-32"></div>
+
+    <script>
+        const MOCK_TODAY = new Date('2031-11-01');
+        let processedData = [];
+
+        document.getElementById('csvFile').addEventListener('change', e => {
+            Papa.parse(e.target.files[0], {
+                header: true, skipEmptyLines: true,
+                complete: r => {
+                    document.getElementById('rawCount').innerText = r.data.length;
+                    const dedupeMap = new Map();
+                    let errors = 0;
+
+                    r.data.forEach(row => {
+                        const name = row['組員']?.trim();
+                        if (!name) return;
+                        
+                        const dateStr = row['取得日期']?.trim();
+                        const months = parseInt(row['有效月數']) || 0;
+                        const acqDate = parseRawDate(dateStr);
+                        
+                        if (!acqDate || isNaN(acqDate)) {
+                            errors++;
+                        }
+
+                        const exp = new Date(acqDate);
+                        exp.setMonth(exp.getMonth() + months);
+
+                        // 合併邏輯：若名字重複，保留取得日期最新的一筆
+                        if (!dedupeMap.has(name) || acqDate > dedupeMap.get(name).acqDate) {
+                            dedupeMap.set(name, {
+                                name, 
+                                type: row['資格項目']?.trim() || '未知資格', 
+                                acqDate, 
+                                exp, 
+                                status: 'ready',
+                                isBad: (!acqDate || isNaN(acqDate))
+                            });
+                        }
+                    });
+
+                    document.getElementById('errorCount').innerText = errors;
+                    processedData = Array.from(dedupeMap.values());
+                    calculateSchedule();
+                }
+            });
+        });
+
+        function parseRawDate(s) {
+            if (!s) return null;
+            let clean = s.replace(/[\/\-]/g, '');
+            if (clean.length === 8) {
+                return new Date(`${clean.substring(0,4)}-${clean.substring(4,6)}-${clean.substring(6,8)}`);
+            }
+            let d = new Date(s);
+            return isNaN(d) ? null : d;
+        }
+
+        function toggleStatus(name) {
+            const p = processedData.find(x => x.name === name);
+            p.status = (p.status === 'ready') ? 'busy' : 'ready';
+            calculateSchedule();
+        }
+
+        function toggleAI(show) {
+            document.getElementById('aiModal').style.display = show ? 'block' : 'none';
+        }
+
+        function calculateSchedule() {
+            let readyList = processedData.filter(p => p.status === 'ready').sort((a, b) => a.exp - b.exp);
+            let busyList = processedData.filter(p => p.status === 'busy');
+            let machineTime = new Date(MOCK_TODAY);
+            let gapCount = 0;
+
+            const scheduled = readyList.map(p => {
+                let endTime = new Date(machineTime);
+                endTime.setDate(endTime.getDate() + 2);
+                machineTime = new Date(endTime);
+                let isGap = endTime > p.exp;
+                if(isGap && !p.isBad) gapCount++;
+                return { ...p, endTime, isGap };
+            });
+
+            render(scheduled, busyList, gapCount, machineTime);
+            updateAISummary(scheduled);
+        }
+
+        function render(ready, busy, gapCount, nextAvail) {
+            document.getElementById('statGapCount').innerText = gapCount;
+            document.getElementById('nextAvailable').innerText = `機台空檔: ${nextAvail.getMonth()+1}/${nextAvail.getDate()}`;
+            
+            const topDiv = document.getElementById('topPriority');
+            const listDiv = document.getElementById('scheduleList');
+            topDiv.innerHTML = ''; listDiv.innerHTML = '';
+
+            if(ready.length > 0) {
+                const first = ready[0];
+                topDiv.innerHTML = `
+                    <div class="p-6 ${first.isGap ? 'critical-flash' : 'bg-green-800'} ${first.isBad ? 'border-4 border-yellow-500' : ''}" onclick="toggleStatus('${first.name}')">
+                        <div class="text-zinc-300 text-xs font-bold mb-1 tracking-widest">--- 即刻召回優先位 ---</div>
+                        <div class="text-7xl font-black tracking-tighter">${first.name}</div>
+                        <div class="text-3xl font-bold">${first.isBad ? '日期數據毀損' : first.type}</div>
+                        <button class="mt-4 w-full bg-white text-black font-black py-4 text-2xl uppercase">標記為任務中</button>
+                    </div>`;
+
+                ready.slice(1).forEach(p => {
+                    const div = document.createElement('div');
+                    div.className = `p-4 border-l-8 ${p.isGap ? 'border-red-600 bg-zinc-900' : 'border-green-600 bg-zinc-900'} flex justify-between items-center`;
+                    div.innerHTML = `<div onclick="toggleStatus('${p.name}')">
+                                        <div class="text-3xl font-black">${p.name}</div>
+                                        <div class="text-xs font-bold text-zinc-500">${p.type} | 到期: ${p.isBad ? '損毀' : (p.exp.getMonth()+1)+'/'+p.exp.getDate()}</div>
+                                     </div>
+                                     <button onclick="toggleStatus('${p.name}')" class="bg-zinc-800 px-6 py-4 font-bold text-xs">任務中</button>`;
+                    listDiv.appendChild(div);
+                });
+            }
+            busy.forEach(p => {
+                const div = document.createElement('div');
+                div.className = `p-4 bg-zinc-900 opacity-30 flex justify-between items-center`;
+                div.innerHTML = `<div class="text-xl font-bold">${p.name} (外勤任務中)</div>
+                                 <button onclick="toggleStatus('${p.name}')" class="bg-zinc-800 px-4 py-2 font-bold text-xs">歸隊</button>`;
+                listDiv.appendChild(div);
+            });
+        }
+
+        function updateAISummary(ready) {
+            const thisMonth = ready.filter(p => p.exp.getFullYear() === 2031 && p.exp.getMonth() === 10); // 11月
+            const criticalGaps = ready.filter(p => p.isGap).length;
+            
+            let html = `
+                <p>🚀 <span class="font-bold text-yellow-400 text-2xl">本月戰力情報 (2031/11)</span></p>
+                <div class="bg-blue-900/40 p-4 rounded-lg">
+                    <p class="font-bold underline mb-2">本月複訓名單 (共 ${thisMonth.length} 人):</p>
+                    <p class="text-white">${thisMonth.map(p => p.name).join('、') || '無'}</p>
+                </div>
+                <div class="space-y-2">
+                    <p>⚠️ <span class="font-bold text-red-400">當前負擔狀況：</span>目前的 48 小時單機排程已產生 <span class="font-bold text-2xl">${criticalGaps}</span> 名戰力缺口。最後一位受訓完畢的人員預計需要排隊至 <span class="font-bold text-white text-xl">${document.getElementById('nextAvailable').innerText}</span>。</p>
+                    <p>💡 <span class="font-bold text-green-400">戰術建議：</span>若要強保關鍵戰力，建議將優先順序較低的人員標記為「任務中」跳過，或申請第二台模擬器搶修。</p>
+                </div>
+            `;
+            document.getElementById('aiContent').innerHTML = html;
+        }
+    </script>
+</body>
+</html>
